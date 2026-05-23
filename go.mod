@@ -2,7 +2,7 @@ module github.com/weave-agent/weave-read
 
 go 1.26.2
 
-require github.com/weave-agent/weave v0.0.6
+require github.com/weave-agent/weave v0.0.8
 
 require golang.org/x/text v0.37.0
 
