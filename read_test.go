@@ -445,6 +445,7 @@ func TestExecuteWithGuardian(t *testing.T) {
 		require.NoError(t, os.WriteFile(path, []byte("guardian allowed"), 0o644))
 
 		var gotReq sdk.GuardianRequest
+
 		setGuardian(&testGuardian{
 			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
 				gotReq = req
@@ -476,6 +477,7 @@ func TestExecuteWithGuardian(t *testing.T) {
 		require.NoError(t, os.WriteFile(path, []byte("should not be read"), 0o644))
 
 		sandboxCalled := false
+
 		setGuardian(&testGuardian{
 			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
 				return sdk.GuardianDecision{
@@ -554,6 +556,7 @@ func TestExecuteGuardianSandboxOrdering(t *testing.T) {
 		require.NoError(t, os.WriteFile(path, []byte("order ok"), 0o644))
 
 		var order []string
+
 		setGuardian(&testGuardian{
 			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
 				order = append(order, "guardian")
@@ -580,6 +583,7 @@ func TestExecuteGuardianSandboxOrdering(t *testing.T) {
 		require.NoError(t, os.WriteFile(path, []byte("blocked"), 0o644))
 
 		var order []string
+
 		setGuardian(&testGuardian{
 			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
 				order = append(order, "guardian")

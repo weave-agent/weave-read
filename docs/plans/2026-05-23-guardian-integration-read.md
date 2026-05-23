@@ -52,9 +52,9 @@ Add guardian policy enforcement to the `read` tool so that file reads are subjec
 - [x] Run read tests — must pass
 
 ### Task 3: Verify and cleanup
-- [ ] Run `make lint` in read extension directory
-- [ ] Run full test suite for read extension
-- [ ] Verify no regressions in existing read functionality
+- [x] Run `make lint` in read extension directory (no local Makefile; ran equivalent `golangci-lint run --config /Users/andrey/Projects/weave/.golangci.yml ./...`)
+- [x] Run full test suite for read extension
+- [x] Verify no regressions in existing read functionality
 
 ## Technical Details
 

@@ -76,7 +76,7 @@ func getGuardian() sdk.Guardian {
 	return g
 }
 
-func init() {
+func init() { //nolint:gochecknoinits // extensions register tools and bus listeners during package load.
 	sdk.OnBusReady(func(bus sdk.Bus) {
 		bus.On(sdk.GuardianRegisteredTopic, func(ev sdk.Event) error {
 			if g, ok := ev.Payload.(sdk.Guardian); ok {
@@ -240,9 +240,11 @@ func formatGuardianBlock(req sdk.GuardianRequest, decision sdk.GuardianDecision)
 	if rule == "" {
 		rule = decision.MatchedGrantID
 	}
+
 	if rule == "" {
 		rule = decision.ID
 	}
+
 	if rule != "" {
 		b.WriteString("\nrule: ")
 		b.WriteString(rule)
