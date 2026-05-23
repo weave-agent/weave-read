@@ -28,16 +28,16 @@ Add guardian policy enforcement to the `read` tool so that file reads are subjec
 ## Implementation Steps
 
 ### Task 1: Add guardian infrastructure to read.go
-- [ ] Add `guardianMu sync.RWMutex`, `guardian sdk.Guardian` package-level variables
-- [ ] Add `setGuardian()` / `getGuardian()` helpers
-- [ ] Add `GuardianRegisteredTopic` listener in `init()` alongside existing `sandbox.registered` listener
-- [ ] Add `newRequestID()` helper
-- [ ] Add `guardianRequest(path string) sdk.GuardianRequest` helper with `Action: sdk.GuardianActionRead`
-- [ ] Add `checkGuardian()` helper (same pattern as bash)
-- [ ] Add `formatGuardianBlock()` helper (same as bash)
-- [ ] Call `checkGuardian()` at start of `Execute()`, before `os.Stat` and sandbox checks
-- [ ] Pass `guardianReq.ID` into sandbox metadata for linkage
-- [ ] Run read tests — must pass before next task
+- [x] Add `guardianMu sync.RWMutex`, `guardian sdk.Guardian` package-level variables
+- [x] Add `setGuardian()` / `getGuardian()` helpers
+- [x] Add `GuardianRegisteredTopic` listener in `init()` alongside existing `sandbox.registered` listener
+- [x] Add `newRequestID()` helper
+- [x] Add `guardianRequest(path string) sdk.GuardianRequest` helper with `Action: sdk.GuardianActionRead`
+- [x] Add `checkGuardian()` helper (same pattern as bash)
+- [x] Add `formatGuardianBlock()` helper (same as bash)
+- [x] Call `checkGuardian()` at start of `Execute()`, before `os.Stat` and sandbox checks
+- [x] Pass `guardianReq.ID` into sandbox metadata for linkage
+- [x] Run read tests — must pass before next task
 
 ### Task 2: Add guardian tests to read_test.go
 - [ ] Write `TestExecuteWithGuardian` with subtests:

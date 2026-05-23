@@ -482,6 +482,27 @@ func TestExecuteRecordsTrackerSynchronously(t *testing.T) {
 	assert.True(t, tracker.WasRead(path), "expected tracker to record read synchronously")
 }
 
+func TestGuardianRequest(t *testing.T) {
+	req := guardianRequest("/tmp/readme.txt")
+
+	assert.NotEmpty(t, req.ID)
+	assert.Contains(t, req.ID, "read-guardian-")
+	assert.Equal(t, "read", req.ToolName)
+	assert.Equal(t, sdk.GuardianActionRead, req.Action)
+	assert.Equal(t, "/tmp/readme.txt", req.Path)
+	assert.Equal(t, "Read file content", req.Description)
+	assert.Equal(t, "read", req.Metadata["operation"])
+}
+
+func TestAllowSandboxReadPassesGuardianMetadata(t *testing.T) {
+	sb := &metadataSandboxer{}
+
+	assert.True(t, allowSandboxRead(sb, "/tmp/file.txt", "guardian-1"))
+	assert.Equal(t, "/tmp/file.txt", sb.path)
+	assert.Equal(t, "read", sb.metadata["operation"])
+	assert.Equal(t, "guardian-1", sb.metadata["guardian_request_id"])
+}
+
 type testSandboxer struct {
 	allowReadFn  func(string) bool
 	allowWriteFn func(string) bool
@@ -514,3 +535,21 @@ func (ts *testSandboxer) AllowRead(path string) bool {
 
 func (ts *testSandboxer) Mode() string   { return "auto" }
 func (ts *testSandboxer) SetMode(string) {}
+
+type metadataSandboxer struct {
+	path     string
+	metadata map[string]any
+}
+
+func (m *metadataSandboxer) AllowRead(path string) bool {
+	m.path = path
+
+	return true
+}
+
+func (m *metadataSandboxer) AllowReadWithMetadata(path string, metadata map[string]any) bool {
+	m.path = path
+	m.metadata = metadata
+
+	return true
+}

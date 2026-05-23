@@ -3,6 +3,8 @@ package read
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/weave-agent/weave/sdk"
 	"github.com/weave-agent/weave/utils/truncate"
@@ -26,16 +30,27 @@ type tool struct{}
 
 var (
 	sandboxerMu sync.RWMutex
-	sandboxer   sdk.Sandboxer
+	sandboxer   readSandboxer
+	guardianMu  sync.RWMutex
+	guardian    sdk.Guardian
+	requestSeq  atomic.Uint64
 )
 
-func setSandboxer(s sdk.Sandboxer) {
+type readSandboxer interface {
+	AllowRead(path string) bool
+}
+
+type metadataReadSandboxer interface {
+	AllowReadWithMetadata(path string, metadata map[string]any) bool
+}
+
+func setSandboxer(s readSandboxer) {
 	sandboxerMu.Lock()
 	sandboxer = s
 	sandboxerMu.Unlock()
 }
 
-func getSandboxer() sdk.Sandboxer {
+func getSandboxer() readSandboxer {
 	sandboxerMu.RLock()
 
 	s := sandboxer
@@ -45,10 +60,34 @@ func getSandboxer() sdk.Sandboxer {
 	return s
 }
 
+func setGuardian(g sdk.Guardian) {
+	guardianMu.Lock()
+	guardian = g
+	guardianMu.Unlock()
+}
+
+func getGuardian() sdk.Guardian {
+	guardianMu.RLock()
+
+	g := guardian
+
+	guardianMu.RUnlock()
+
+	return g
+}
+
 func init() {
 	sdk.OnBusReady(func(bus sdk.Bus) {
-		bus.On("sandbox.registered", func(ev sdk.Event) error {
-			if s, ok := ev.Payload.(sdk.Sandboxer); ok {
+		bus.On(sdk.GuardianRegisteredTopic, func(ev sdk.Event) error {
+			if g, ok := ev.Payload.(sdk.Guardian); ok {
+				setGuardian(g)
+			}
+
+			return nil
+		})
+
+		bus.On(sdk.SandboxRegisteredTopic, func(ev sdk.Event) error {
+			if s, ok := ev.Payload.(readSandboxer); ok {
 				setSandboxer(s)
 			}
 
@@ -140,10 +179,109 @@ func parsePagination(args map[string]any) (offset, limit int) {
 	return offset, limit
 }
 
+func newRequestID(prefix string) string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return prefix + "-" + hex.EncodeToString(b[:])
+	}
+
+	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().UnixNano(), requestSeq.Add(1))
+}
+
+func guardianRequest(path string) sdk.GuardianRequest {
+	return sdk.GuardianRequest{
+		ID:          newRequestID("read-guardian"),
+		ToolName:    "read",
+		Action:      sdk.GuardianActionRead,
+		Path:        path,
+		Description: "Read file content",
+		Metadata: map[string]any{
+			"operation": "read",
+		},
+	}
+}
+
+func checkGuardian(ctx context.Context, path string) (sdk.GuardianRequest, *sdk.ToolResult) {
+	req := guardianRequest(path)
+
+	g := getGuardian()
+	if g == nil {
+		return req, nil
+	}
+
+	decision, err := g.Decide(ctx, req)
+	if err != nil {
+		return req, &sdk.ToolResult{Content: "guardian: " + err.Error(), IsError: true}
+	}
+
+	switch decision.Action {
+	case sdk.GuardianDecisionAllow:
+		return req, nil
+	case sdk.GuardianDecisionBlock:
+		return req, &sdk.ToolResult{Content: formatGuardianBlock(req, decision), IsError: true}
+	default:
+		decision.Action = sdk.GuardianDecisionBlock
+		if decision.Reason == "" {
+			decision.Reason = "guardian returned unresolved approval decision"
+		}
+
+		return req, &sdk.ToolResult{Content: formatGuardianBlock(req, decision), IsError: true}
+	}
+}
+
+func formatGuardianBlock(req sdk.GuardianRequest, decision sdk.GuardianDecision) string {
+	var b strings.Builder
+
+	b.WriteString("guardian: blocked")
+	b.WriteString("\naction: ")
+	b.WriteString(string(req.Action))
+
+	rule := decision.Profile
+	if rule == "" {
+		rule = decision.MatchedGrantID
+	}
+	if rule == "" {
+		rule = decision.ID
+	}
+	if rule != "" {
+		b.WriteString("\nrule: ")
+		b.WriteString(rule)
+	}
+
+	if decision.Reason != "" {
+		b.WriteString("\nreason: ")
+		b.WriteString(decision.Reason)
+	}
+
+	return b.String()
+}
+
+func allowSandboxRead(s readSandboxer, path, guardianRequestID string) bool {
+	if s == nil {
+		return true
+	}
+
+	metadata := map[string]any{
+		"operation":           "read",
+		"guardian_request_id": guardianRequestID,
+	}
+
+	if ms, ok := s.(metadataReadSandboxer); ok {
+		return ms.AllowReadWithMetadata(path, metadata)
+	}
+
+	return s.AllowRead(path)
+}
+
 func (t *tool) Execute(ctx context.Context, args map[string]any) (sdk.ToolResult, error) {
 	path, _ := args[ParamPath].(string)
 	if path == "" {
 		return sdk.ToolResult{Content: "error: path is required", IsError: true}, nil
+	}
+
+	guardianReq, guardianErr := checkGuardian(ctx, path)
+	if guardianErr != nil {
+		return *guardianErr, nil
 	}
 
 	info, err := os.Stat(path)
@@ -161,7 +299,7 @@ func (t *tool) Execute(ctx context.Context, args map[string]any) (sdk.ToolResult
 		}
 	}
 
-	if s := getSandboxer(); s != nil && !s.AllowRead(path) {
+	if !allowSandboxRead(getSandboxer(), path, guardianReq.ID) {
 		return sdk.ToolResult{Content: "sandbox: read denied — path is protected", IsError: true}, nil
 	}
 
