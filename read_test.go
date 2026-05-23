@@ -2,6 +2,7 @@ package read
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -426,6 +427,184 @@ func TestExecuteNoEventWithoutBus(t *testing.T) {
 	assert.Contains(t, result.Content, "content")
 }
 
+func TestExecuteWithGuardian(t *testing.T) {
+	origGuardian := getGuardian()
+	origSandboxer := getSandboxer()
+
+	setGuardian(nil)
+	setSandboxer(nil)
+
+	t.Cleanup(func() {
+		setGuardian(origGuardian)
+		setSandboxer(origSandboxer)
+	})
+
+	t.Run("allow decision permits read", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "allow.txt")
+		require.NoError(t, os.WriteFile(path, []byte("guardian allowed"), 0o644))
+
+		var gotReq sdk.GuardianRequest
+		setGuardian(&testGuardian{
+			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+				gotReq = req
+
+				return sdk.GuardianDecision{
+					ID:        "decision-allow",
+					RequestID: req.ID,
+					Action:    sdk.GuardianDecisionAllow,
+				}, nil
+			},
+		})
+		setSandboxer(nil)
+
+		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
+		require.NoError(t, err)
+		assert.False(t, result.IsError)
+		assert.Contains(t, result.Content, "guardian allowed")
+
+		assert.NotEmpty(t, gotReq.ID)
+		assert.Equal(t, "read", gotReq.ToolName)
+		assert.Equal(t, sdk.GuardianActionRead, gotReq.Action)
+		assert.Equal(t, path, gotReq.Path)
+		assert.Equal(t, "read", gotReq.Metadata["operation"])
+	})
+
+	t.Run("block decision returns guardian error", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "block.txt")
+		require.NoError(t, os.WriteFile(path, []byte("should not be read"), 0o644))
+
+		sandboxCalled := false
+		setGuardian(&testGuardian{
+			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+				return sdk.GuardianDecision{
+					ID:        "decision-block",
+					RequestID: req.ID,
+					Action:    sdk.GuardianDecisionBlock,
+					Reason:    "read blocked by policy",
+					Profile:   "strict",
+				}, nil
+			},
+		})
+		setSandboxer(&testSandboxer{allowReadFn: func(string) bool {
+			sandboxCalled = true
+
+			return true
+		}})
+
+		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
+		require.NoError(t, err)
+		assert.True(t, result.IsError)
+		assert.Contains(t, result.Content, "guardian: blocked")
+		assert.Contains(t, result.Content, "action: read")
+		assert.Contains(t, result.Content, "rule: strict")
+		assert.Contains(t, result.Content, "reason: read blocked by policy")
+		assert.False(t, sandboxCalled)
+	})
+
+	t.Run("missing guardian permits read", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "missing.txt")
+		require.NoError(t, os.WriteFile(path, []byte("no guardian"), 0o644))
+
+		setGuardian(nil)
+		setSandboxer(nil)
+
+		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
+		require.NoError(t, err)
+		assert.False(t, result.IsError)
+		assert.Contains(t, result.Content, "no guardian")
+	})
+
+	t.Run("guardian error returns tool error", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "error.txt")
+		require.NoError(t, os.WriteFile(path, []byte("policy unavailable"), 0o644))
+
+		setGuardian(&testGuardian{
+			decideFn: func(context.Context, sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+				return sdk.GuardianDecision{}, errors.New("policy engine unavailable")
+			},
+		})
+		setSandboxer(nil)
+
+		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
+		require.NoError(t, err)
+		assert.True(t, result.IsError)
+		assert.Contains(t, result.Content, "guardian: policy engine unavailable")
+	})
+}
+
+func TestExecuteGuardianSandboxOrdering(t *testing.T) {
+	origGuardian := getGuardian()
+	origSandboxer := getSandboxer()
+
+	setGuardian(nil)
+	setSandboxer(nil)
+
+	t.Cleanup(func() {
+		setGuardian(origGuardian)
+		setSandboxer(origSandboxer)
+	})
+
+	t.Run("guardian allow runs before sandbox", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "order.txt")
+		require.NoError(t, os.WriteFile(path, []byte("order ok"), 0o644))
+
+		var order []string
+		setGuardian(&testGuardian{
+			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+				order = append(order, "guardian")
+
+				return sdk.GuardianDecision{RequestID: req.ID, Action: sdk.GuardianDecisionAllow}, nil
+			},
+		})
+		setSandboxer(&testSandboxer{allowReadFn: func(string) bool {
+			order = append(order, "sandbox")
+
+			return true
+		}})
+
+		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
+		require.NoError(t, err)
+		assert.False(t, result.IsError)
+		assert.Contains(t, result.Content, "order ok")
+		assert.Equal(t, []string{"guardian", "sandbox"}, order)
+	})
+
+	t.Run("guardian block skips sandbox", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "blocked.txt")
+		require.NoError(t, os.WriteFile(path, []byte("blocked"), 0o644))
+
+		var order []string
+		setGuardian(&testGuardian{
+			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+				order = append(order, "guardian")
+
+				return sdk.GuardianDecision{
+					RequestID: req.ID,
+					Action:    sdk.GuardianDecisionBlock,
+					Reason:    "blocked before sandbox",
+				}, nil
+			},
+		})
+		setSandboxer(&testSandboxer{allowReadFn: func(string) bool {
+			order = append(order, "sandbox")
+
+			return true
+		}})
+
+		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
+		require.NoError(t, err)
+		assert.True(t, result.IsError)
+		assert.Contains(t, result.Content, "reason: blocked before sandbox")
+		assert.Equal(t, []string{"guardian"}, order)
+	})
+}
+
 // mockFileTracker is a test-double for sdk.FileTracker.
 type mockFileTracker struct {
 	mu    sync.RWMutex
@@ -535,6 +714,26 @@ func (ts *testSandboxer) AllowRead(path string) bool {
 
 func (ts *testSandboxer) Mode() string   { return "auto" }
 func (ts *testSandboxer) SetMode(string) {}
+
+type testGuardian struct {
+	decideFn func(context.Context, sdk.GuardianRequest) (sdk.GuardianDecision, error)
+}
+
+func (tg *testGuardian) Decide(ctx context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+	if tg.decideFn == nil {
+		return sdk.GuardianDecision{Action: sdk.GuardianDecisionAllow}, nil
+	}
+
+	return tg.decideFn(ctx, req)
+}
+
+func (tg *testGuardian) Resolve(context.Context, string, sdk.GuardianResolution) error {
+	return nil
+}
+
+func (tg *testGuardian) Snapshot(context.Context) (sdk.GuardianSnapshot, error) {
+	return sdk.GuardianSnapshot{}, nil
+}
 
 type metadataSandboxer struct {
 	path     string
