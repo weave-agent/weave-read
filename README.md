@@ -18,7 +18,7 @@ weave install github.com/weave-agent/weave-read --name read
 
 ## Guardian Policy
 
-The `read` tool sends each requested path to the registered Guardian before stat, sandbox, or file read operations. It uses `sdk.GuardianActionRead`.
+The `read` tool sends each resolved read path to the registered Guardian before sandbox or file read operations. It uses `sdk.GuardianActionRead`.
 
 If no Guardian is registered, reads proceed normally. Guardian allow decisions continue to sandbox checks and the normal read path. Guardian block decisions return a tool error beginning with `guardian: blocked`; Guardian errors return `guardian: <error>`.
 

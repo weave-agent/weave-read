@@ -231,7 +231,9 @@ func TestExecuteSandboxDenied(t *testing.T) {
 	path := filepath.Join(dir, "secret.txt")
 	require.NoError(t, os.WriteFile(path, []byte("secret data"), 0o644))
 
-	sb := &testSandboxer{allowReadFn: func(p string) bool { return false }}
+	sb := &testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
+		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionDenied, Reason: "path is protected"}, nil
+	}}
 	setSandboxer(sb)
 
 	t.Cleanup(func() { setSandboxer(nil) })
@@ -248,7 +250,9 @@ func TestExecuteSandboxAllowed(t *testing.T) {
 	path := filepath.Join(dir, "readable.txt")
 	require.NoError(t, os.WriteFile(path, []byte("hello"), 0o644))
 
-	sb := &testSandboxer{allowReadFn: func(p string) bool { return true }}
+	sb := &testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
+		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
+	}}
 	setSandboxer(sb)
 
 	t.Cleanup(func() { setSandboxer(nil) })
@@ -520,10 +524,10 @@ func TestExecuteWithGuardian(t *testing.T) {
 				}, nil
 			},
 		})
-		setSandboxer(&testSandboxer{allowReadFn: func(string) bool {
+		setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
 			sandboxCalled = true
 
-			return true
+			return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
 		}})
 
 		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
@@ -601,10 +605,10 @@ func TestExecuteWithGuardian(t *testing.T) {
 				}, nil
 			},
 		})
-		setSandboxer(&testSandboxer{allowReadFn: func(string) bool {
+		setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
 			sandboxCalled = true
 
-			return true
+			return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
 		}})
 
 		ctx := sdk.WithBus(context.Background(), eventBus)
@@ -650,10 +654,10 @@ func TestExecuteWithGuardian(t *testing.T) {
 				}, nil
 			},
 		})
-		setSandboxer(&testSandboxer{allowReadFn: func(string) bool {
+		setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
 			sandboxCalled = true
 
-			return true
+			return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
 		}})
 
 		ctx := sdk.WithBus(context.Background(), eventBus)
@@ -698,17 +702,19 @@ func TestExecuteNormalizedPathWithGuardian(t *testing.T) {
 			return sdk.GuardianDecision{RequestID: req.ID, Action: sdk.GuardianDecisionAllow}, nil
 		},
 	})
-	setSandboxer(&testSandboxer{allowReadFn: func(path string) bool {
+	setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
+		require.Len(t, req.Filesystem, 1)
+		path := req.Filesystem[0].Path
 		sandboxPath = path
 
-		return true
+		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
 	}})
 
 	result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": inputPath})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
 	assert.Contains(t, result.Content, "quoted content")
-	assert.Equal(t, inputPath, guardianPath)
+	assert.Equal(t, actualPath, guardianPath)
 	assert.Equal(t, actualPath, sandboxPath)
 }
 
@@ -738,10 +744,10 @@ func TestExecuteGuardianSandboxOrdering(t *testing.T) {
 				return sdk.GuardianDecision{RequestID: req.ID, Action: sdk.GuardianDecisionAllow}, nil
 			},
 		})
-		setSandboxer(&testSandboxer{allowReadFn: func(string) bool {
+		setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
 			order = append(order, "sandbox")
 
-			return true
+			return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
 		}})
 
 		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
@@ -769,10 +775,10 @@ func TestExecuteGuardianSandboxOrdering(t *testing.T) {
 				}, nil
 			},
 		})
-		setSandboxer(&testSandboxer{allowReadFn: func(string) bool {
+		setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
 			order = append(order, "sandbox")
 
-			return true
+			return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
 		}})
 
 		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
@@ -851,47 +857,46 @@ func TestGuardianRequest(t *testing.T) {
 	assert.Equal(t, "read", req.Metadata["operation"])
 }
 
-func TestAllowSandboxReadPassesGuardianMetadata(t *testing.T) {
-	sb := &metadataSandboxer{}
+func TestCheckSandboxReadPassesGuardianMetadata(t *testing.T) {
+	var gotReq sdk.SandboxExpansionRequest
 
-	assert.True(t, allowSandboxRead(sb, "/tmp/file.txt", "guardian-1"))
-	assert.Equal(t, "/tmp/file.txt", sb.path)
-	assert.Equal(t, "read", sb.metadata["operation"])
-	assert.Equal(t, "guardian-1", sb.metadata["guardian_request_id"])
+	sb := &testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
+		gotReq = req
+
+		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
+	}}
+
+	assert.Nil(t, checkSandboxRead(context.Background(), sb, "/tmp/file.txt", "guardian-1"))
+	require.Len(t, gotReq.Filesystem, 1)
+	assert.Equal(t, "/tmp/file.txt", gotReq.Filesystem[0].Path)
+	assert.Equal(t, sdk.SandboxFilesystemRead, gotReq.Filesystem[0].Access)
+	assert.Equal(t, "read", gotReq.Metadata["operation"])
+	assert.Equal(t, "guardian-1", gotReq.Metadata["guardian_request_id"])
 }
 
 type testSandboxer struct {
-	allowReadFn  func(string) bool
-	allowWriteFn func(string) bool
-	wrapFn       func(cmd, dir string) (string, error)
+	requestExpansionFn func(context.Context, sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error)
 }
 
-func (ts *testSandboxer) WrapCommand(cmd, dir string) (string, error) {
-	if ts.wrapFn != nil {
-		return ts.wrapFn(cmd, dir)
+func (ts *testSandboxer) WrapCommand(context.Context, sdk.SandboxCommandRequest) (sdk.SandboxCommand, error) {
+	return sdk.SandboxCommand{}, nil
+}
+
+func (ts *testSandboxer) Status(context.Context) (sdk.SandboxStatus, error) {
+	return sdk.SandboxStatus{}, nil
+}
+
+func (ts *testSandboxer) RequestExpansion(ctx context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
+	if ts.requestExpansionFn != nil {
+		return ts.requestExpansionFn(ctx, req)
 	}
 
-	return cmd, nil
+	return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
 }
 
-func (ts *testSandboxer) AllowWrite(path string) bool {
-	if ts.allowWriteFn != nil {
-		return ts.allowWriteFn(path)
-	}
-
-	return true
+func (ts *testSandboxer) ResolveExpansion(context.Context, string, sdk.SandboxExpansionResolution) error {
+	return nil
 }
-
-func (ts *testSandboxer) AllowRead(path string) bool {
-	if ts.allowReadFn != nil {
-		return ts.allowReadFn(path)
-	}
-
-	return true
-}
-
-func (ts *testSandboxer) Mode() string   { return "auto" }
-func (ts *testSandboxer) SetMode(string) {}
 
 type testGuardian struct {
 	decideFn func(context.Context, sdk.GuardianRequest) (sdk.GuardianDecision, error)
@@ -911,24 +916,6 @@ func (tg *testGuardian) Resolve(context.Context, string, sdk.GuardianResolution)
 
 func (tg *testGuardian) Snapshot(context.Context) (sdk.GuardianSnapshot, error) {
 	return sdk.GuardianSnapshot{}, nil
-}
-
-type metadataSandboxer struct {
-	path     string
-	metadata map[string]any
-}
-
-func (m *metadataSandboxer) AllowRead(path string) bool {
-	m.path = path
-
-	return true
-}
-
-func (m *metadataSandboxer) AllowReadWithMetadata(path string, metadata map[string]any) bool {
-	m.path = path
-	m.metadata = metadata
-
-	return true
 }
 
 type registrationBus struct {

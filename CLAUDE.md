@@ -3,9 +3,9 @@
 ## Guardian/Sandbox Integration
 
 - Register runtime integrations through `sdk.OnBusReady`, listening for `sdk.GuardianRegisteredTopic` and `sdk.SandboxRegisteredTopic`.
-- Guardian checks run after path argument validation and before path normalization, sandbox checks, directory checks, file reads, read-done events, and file tracker writes.
+- Guardian checks run after path argument validation and effective path resolution, and before sandbox checks, directory checks, file reads, read-done events, and file tracker writes.
 - `read` uses `sdk.GuardianActionRead`; unresolved guardian decisions, including `ask`, are treated as blocks.
-- Sandbox reads use `AllowReadWithMetadata` when available and include `guardian_request_id` so sandbox decisions can be correlated with guardian decisions.
+- Sandbox reads use `sdk.Sandboxer.RequestExpansion` with `sdk.SandboxFilesystemRead` and include `guardian_request_id` so sandbox decisions can be correlated with guardian decisions.
 
 ## Build and Test
 
