@@ -540,6 +540,36 @@ func TestExecuteWithGuardian(t *testing.T) {
 		assert.False(t, sandboxCalled)
 	})
 
+	t.Run("block decision runs before stat error", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing-secret.txt")
+
+		sandboxCalled := false
+
+		setGuardian(&testGuardian{
+			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+				return sdk.GuardianDecision{
+					ID:        "decision-block-missing",
+					RequestID: req.ID,
+					Action:    sdk.GuardianDecisionBlock,
+					Reason:    "missing path is still protected",
+				}, nil
+			},
+		})
+		setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
+			sandboxCalled = true
+
+			return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
+		}})
+
+		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
+		require.NoError(t, err)
+		assert.True(t, result.IsError)
+		assert.Contains(t, result.Content, "guardian: blocked")
+		assert.Contains(t, result.Content, "reason: missing path is still protected")
+		assert.NotContains(t, result.Content, "no such file")
+		assert.False(t, sandboxCalled)
+	})
+
 	t.Run("missing guardian permits read", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "missing.txt")
@@ -716,6 +746,51 @@ func TestExecuteNormalizedPathWithGuardian(t *testing.T) {
 	assert.Contains(t, result.Content, "quoted content")
 	assert.Equal(t, actualPath, guardianPath)
 	assert.Equal(t, actualPath, sandboxPath)
+}
+
+func TestExecuteRelativePathWithGuardian(t *testing.T) {
+	origGuardian := getGuardian()
+	origSandboxer := getSandboxer()
+
+	setGuardian(nil)
+	setSandboxer(nil)
+
+	t.Cleanup(func() {
+		setGuardian(origGuardian)
+		setSandboxer(origSandboxer)
+	})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "relative.txt")
+	require.NoError(t, os.WriteFile(path, []byte("relative content"), 0o644))
+
+	t.Chdir(dir)
+
+	var (
+		guardianPath string
+		sandboxPath  string
+	)
+
+	setGuardian(&testGuardian{
+		decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+			guardianPath = req.Path
+
+			return sdk.GuardianDecision{RequestID: req.ID, Action: sdk.GuardianDecisionAllow}, nil
+		},
+	})
+	setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
+		require.Len(t, req.Filesystem, 1)
+		sandboxPath = req.Filesystem[0].Path
+
+		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
+	}})
+
+	result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": "relative.txt"})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "relative content")
+	assert.Equal(t, path, guardianPath)
+	assert.Equal(t, path, sandboxPath)
 }
 
 func TestExecuteGuardianSandboxOrdering(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -291,30 +292,34 @@ func checkSandboxRead(ctx context.Context, s sdk.Sandboxer, path, guardianReques
 	return &sdk.ToolResult{Content: "sandbox: read denied — " + reason, IsError: true}
 }
 
+func effectivePath(path string) (string, error) {
+	absPath, err := filepath.Abs(normalizeMacOSPath(path))
+	if err != nil {
+		return "", fmt.Errorf("resolve effective path: %w", err)
+	}
+
+	return filepath.Clean(absPath), nil
+}
+
 func (t *tool) Execute(ctx context.Context, args map[string]any) (sdk.ToolResult, error) {
 	path, _ := args[ParamPath].(string)
 	if path == "" {
 		return sdk.ToolResult{Content: "error: path is required", IsError: true}, nil
 	}
 
-	info, err := os.Stat(path)
+	path, err := effectivePath(path)
 	if err != nil {
-		normalized := normalizeMacOSPath(path)
-		if normalized != path {
-			info, err = os.Stat(normalized)
-			if err == nil {
-				path = normalized
-			}
-		}
-
-		if err != nil {
-			return sdk.ToolResult{Content: fmt.Sprintf("error: %s", err), IsError: true}, nil
-		}
+		return sdk.ToolResult{Content: fmt.Sprintf("error: %s", err), IsError: true}, nil
 	}
 
 	guardianReq, guardianErr := checkGuardian(ctx, path)
 	if guardianErr != nil {
 		return *guardianErr, nil
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return sdk.ToolResult{Content: fmt.Sprintf("error: %s", err), IsError: true}, nil
 	}
 
 	if sandboxErr := checkSandboxRead(ctx, getSandboxer(), path, guardianReq.ID); sandboxErr != nil {
