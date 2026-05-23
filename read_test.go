@@ -380,7 +380,7 @@ func TestExecutePublishesReadDoneEvent(t *testing.T) {
 
 	payload, ok := captured.event.Payload.(sdk.ReadDonePayload)
 	require.True(t, ok, "expected payload to be ReadDonePayload")
-	assert.Equal(t, path, payload.Path)
+	assert.Equal(t, resolvedTestPath(t, path), payload.Path)
 	assert.False(t, payload.ModTime.IsZero())
 }
 
@@ -502,7 +502,7 @@ func TestExecuteWithGuardian(t *testing.T) {
 		assert.NotEmpty(t, gotReq.ID)
 		assert.Equal(t, "read", gotReq.ToolName)
 		assert.Equal(t, sdk.GuardianActionRead, gotReq.Action)
-		assert.Equal(t, path, gotReq.Path)
+		assert.Equal(t, resolvedTestPath(t, path), gotReq.Path)
 		assert.Equal(t, "read", gotReq.Metadata["operation"])
 	})
 
@@ -744,8 +744,104 @@ func TestExecuteNormalizedPathWithGuardian(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
 	assert.Contains(t, result.Content, "quoted content")
-	assert.Equal(t, actualPath, guardianPath)
-	assert.Equal(t, actualPath, sandboxPath)
+	expectedPath := resolvedTestPath(t, actualPath)
+	assert.Equal(t, expectedPath, guardianPath)
+	assert.Equal(t, expectedPath, sandboxPath)
+}
+
+func TestExecutePrefersExistingLiteralPathOverNormalizedPath(t *testing.T) {
+	origGuardian := getGuardian()
+	origSandboxer := getSandboxer()
+
+	setGuardian(nil)
+	setSandboxer(nil)
+
+	t.Cleanup(func() {
+		setGuardian(origGuardian)
+		setSandboxer(origSandboxer)
+	})
+
+	dir := t.TempDir()
+	literalPath := filepath.Join(dir, "“quoted”.txt")
+	normalizedPath := filepath.Join(dir, `"quoted".txt`)
+
+	require.NoError(t, os.WriteFile(literalPath, []byte("literal content"), 0o644))
+	require.NoError(t, os.WriteFile(normalizedPath, []byte("normalized content"), 0o644))
+
+	var (
+		guardianPath string
+		sandboxPath  string
+	)
+
+	setGuardian(&testGuardian{
+		decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+			guardianPath = req.Path
+
+			return sdk.GuardianDecision{RequestID: req.ID, Action: sdk.GuardianDecisionAllow}, nil
+		},
+	})
+	setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
+		require.Len(t, req.Filesystem, 1)
+		sandboxPath = req.Filesystem[0].Path
+
+		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
+	}})
+
+	result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": literalPath})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "literal content")
+	assert.NotContains(t, result.Content, "normalized content")
+	expectedPath := resolvedTestPath(t, literalPath)
+	assert.Equal(t, expectedPath, guardianPath)
+	assert.Equal(t, expectedPath, sandboxPath)
+}
+
+func TestExecuteResolvesSymlinkBeforeGuardianAndSandbox(t *testing.T) {
+	origGuardian := getGuardian()
+	origSandboxer := getSandboxer()
+
+	setGuardian(nil)
+	setSandboxer(nil)
+
+	t.Cleanup(func() {
+		setGuardian(origGuardian)
+		setSandboxer(origSandboxer)
+	})
+
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "target.txt")
+	linkPath := filepath.Join(dir, "link.txt")
+
+	require.NoError(t, os.WriteFile(targetPath, []byte("target content"), 0o644))
+	require.NoError(t, os.Symlink(targetPath, linkPath))
+
+	var (
+		guardianPath string
+		sandboxPath  string
+	)
+
+	setGuardian(&testGuardian{
+		decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+			guardianPath = req.Path
+
+			return sdk.GuardianDecision{RequestID: req.ID, Action: sdk.GuardianDecisionAllow}, nil
+		},
+	})
+	setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
+		require.Len(t, req.Filesystem, 1)
+		sandboxPath = req.Filesystem[0].Path
+
+		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
+	}})
+
+	result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": linkPath})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "target content")
+	expectedPath := resolvedTestPath(t, targetPath)
+	assert.Equal(t, expectedPath, guardianPath)
+	assert.Equal(t, expectedPath, sandboxPath)
 }
 
 func TestExecuteRelativePathWithGuardian(t *testing.T) {
@@ -789,8 +885,9 @@ func TestExecuteRelativePathWithGuardian(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
 	assert.Contains(t, result.Content, "relative content")
-	assert.Equal(t, path, guardianPath)
-	assert.Equal(t, path, sandboxPath)
+	expectedPath := resolvedTestPath(t, path)
+	assert.Equal(t, expectedPath, guardianPath)
+	assert.Equal(t, expectedPath, sandboxPath)
 }
 
 func TestExecuteGuardianSandboxOrdering(t *testing.T) {
@@ -917,7 +1014,16 @@ func TestExecuteRecordsTrackerSynchronously(t *testing.T) {
 
 	// Tracker must be updated synchronously before Execute returns,
 	// so a back-to-back edit check will not race.
-	assert.True(t, tracker.WasRead(path), "expected tracker to record read synchronously")
+	assert.True(t, tracker.WasRead(resolvedTestPath(t, path)), "expected tracker to record read synchronously")
+}
+
+func resolvedTestPath(t *testing.T, path string) string {
+	t.Helper()
+
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	require.NoError(t, err)
+
+	return resolvedPath
 }
 
 func TestGuardianRequest(t *testing.T) {

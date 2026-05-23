@@ -293,12 +293,30 @@ func checkSandboxRead(ctx context.Context, s sdk.Sandboxer, path, guardianReques
 }
 
 func effectivePath(path string) (string, error) {
-	absPath, err := filepath.Abs(normalizeMacOSPath(path))
+	selectedPath := path
+
+	if _, err := os.Stat(path); err != nil {
+		normalizedPath := normalizeMacOSPath(path)
+		if normalizedPath != path {
+			if _, normalizedErr := os.Stat(normalizedPath); normalizedErr == nil {
+				selectedPath = normalizedPath
+			}
+		}
+	}
+
+	absPath, err := filepath.Abs(selectedPath)
 	if err != nil {
 		return "", fmt.Errorf("resolve effective path: %w", err)
 	}
 
-	return filepath.Clean(absPath), nil
+	cleanPath := filepath.Clean(absPath)
+
+	resolvedPath, err := filepath.EvalSymlinks(cleanPath)
+	if err == nil {
+		return resolvedPath, nil
+	}
+
+	return cleanPath, nil
 }
 
 func (t *tool) Execute(ctx context.Context, args map[string]any) (sdk.ToolResult, error) {
