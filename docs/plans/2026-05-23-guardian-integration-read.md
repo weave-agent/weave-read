@@ -82,5 +82,5 @@ func guardianRequest(path string) sdk.GuardianRequest {
 5. Open file, read content
 
 ## Post-Completion
-- Manual verification: test read tool with `ask` profile — should auto-allow reads
-- Test with custom profile that blocks reads — should block
+- [ ] Manual verification: test read tool with `ask` profile — should auto-allow reads
+- [ ] Manual verification: test with custom profile that blocks reads — should block

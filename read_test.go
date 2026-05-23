@@ -427,6 +427,37 @@ func TestExecuteNoEventWithoutBus(t *testing.T) {
 	assert.Contains(t, result.Content, "content")
 }
 
+func TestGuardianAndSandboxRegistration(t *testing.T) {
+	origGuardian := getGuardian()
+	origSandboxer := getSandboxer()
+
+	setGuardian(nil)
+	setSandboxer(nil)
+
+	t.Cleanup(func() {
+		setGuardian(origGuardian)
+		setSandboxer(origSandboxer)
+	})
+
+	registrationBus := newRegistrationBus()
+	sdk.InvokeBusSubscribers(registrationBus)
+
+	g := &testGuardian{}
+	s := &testSandboxer{}
+
+	registrationBus.Publish(sdk.NewEvent(sdk.GuardianRegisteredTopic, g))
+	registrationBus.Publish(sdk.NewEvent(sdk.SandboxRegisteredTopic, s))
+
+	assert.Same(t, g, getGuardian())
+	assert.Same(t, s, getSandboxer())
+
+	registrationBus.Publish(sdk.NewEvent(sdk.GuardianRegisteredTopic, "not a guardian"))
+	registrationBus.Publish(sdk.NewEvent(sdk.SandboxRegisteredTopic, "not a sandboxer"))
+
+	assert.Same(t, g, getGuardian())
+	assert.Same(t, s, getSandboxer())
+}
+
 func TestExecuteWithGuardian(t *testing.T) {
 	origGuardian := getGuardian()
 	origSandboxer := getSandboxer()
@@ -536,6 +567,149 @@ func TestExecuteWithGuardian(t *testing.T) {
 		assert.True(t, result.IsError)
 		assert.Contains(t, result.Content, "guardian: policy engine unavailable")
 	})
+
+	t.Run("ask decision returns unresolved guardian error", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "ask.txt")
+		require.NoError(t, os.WriteFile(path, []byte("pending approval"), 0o644))
+
+		eventBus := bus.New()
+		tracker := newMockFileTracker()
+		sdk.SetFileTracker(tracker)
+
+		var eventSeen bool
+
+		eventBus.On("tool.read.done", func(sdk.Event) error {
+			eventSeen = true
+
+			return nil
+		})
+
+		t.Cleanup(func() {
+			sdk.SetFileTracker(nil)
+			require.NoError(t, eventBus.Close())
+		})
+
+		sandboxCalled := false
+
+		setGuardian(&testGuardian{
+			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+				return sdk.GuardianDecision{
+					ID:        "decision-ask",
+					RequestID: req.ID,
+					Action:    sdk.GuardianDecisionAsk,
+				}, nil
+			},
+		})
+		setSandboxer(&testSandboxer{allowReadFn: func(string) bool {
+			sandboxCalled = true
+
+			return true
+		}})
+
+		ctx := sdk.WithBus(context.Background(), eventBus)
+		result, err := (&tool{}).Execute(ctx, map[string]any{"path": path})
+		require.NoError(t, err)
+		assert.True(t, result.IsError)
+		assert.Contains(t, result.Content, "guardian: blocked")
+		assert.Contains(t, result.Content, "reason: guardian returned unresolved approval decision")
+		assert.False(t, sandboxCalled)
+		assert.False(t, tracker.WasRead(path))
+		assert.False(t, eventSeen)
+	})
+
+	t.Run("unknown decision returns unresolved guardian error", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "unknown.txt")
+		require.NoError(t, os.WriteFile(path, []byte("unknown approval"), 0o644))
+
+		eventBus := bus.New()
+		tracker := newMockFileTracker()
+		sdk.SetFileTracker(tracker)
+
+		var eventSeen bool
+
+		eventBus.On("tool.read.done", func(sdk.Event) error {
+			eventSeen = true
+
+			return nil
+		})
+
+		t.Cleanup(func() {
+			sdk.SetFileTracker(nil)
+			require.NoError(t, eventBus.Close())
+		})
+
+		sandboxCalled := false
+
+		setGuardian(&testGuardian{
+			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+				return sdk.GuardianDecision{
+					ID:        "decision-unknown",
+					RequestID: req.ID,
+				}, nil
+			},
+		})
+		setSandboxer(&testSandboxer{allowReadFn: func(string) bool {
+			sandboxCalled = true
+
+			return true
+		}})
+
+		ctx := sdk.WithBus(context.Background(), eventBus)
+		result, err := (&tool{}).Execute(ctx, map[string]any{"path": path})
+		require.NoError(t, err)
+		assert.True(t, result.IsError)
+		assert.Contains(t, result.Content, "guardian: blocked")
+		assert.Contains(t, result.Content, "reason: guardian returned unresolved approval decision")
+		assert.False(t, sandboxCalled)
+		assert.False(t, tracker.WasRead(path))
+		assert.False(t, eventSeen)
+	})
+}
+
+func TestExecuteNormalizedPathWithGuardian(t *testing.T) {
+	origGuardian := getGuardian()
+	origSandboxer := getSandboxer()
+
+	setGuardian(nil)
+	setSandboxer(nil)
+
+	t.Cleanup(func() {
+		setGuardian(origGuardian)
+		setSandboxer(origSandboxer)
+	})
+
+	dir := t.TempDir()
+	actualPath := filepath.Join(dir, `"quoted".txt`)
+	inputPath := filepath.Join(dir, "“quoted”.txt")
+
+	require.NoError(t, os.WriteFile(actualPath, []byte("quoted content"), 0o644))
+
+	var (
+		guardianPath string
+		sandboxPath  string
+	)
+
+	setGuardian(&testGuardian{
+		decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+			guardianPath = req.Path
+
+			return sdk.GuardianDecision{RequestID: req.ID, Action: sdk.GuardianDecisionAllow}, nil
+		},
+	})
+	setSandboxer(&testSandboxer{allowReadFn: func(path string) bool {
+		sandboxPath = path
+
+		return true
+	}})
+
+	result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": inputPath})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "quoted content")
+	assert.Equal(t, inputPath, guardianPath)
+	assert.Equal(t, actualPath, sandboxPath)
 }
 
 func TestExecuteGuardianSandboxOrdering(t *testing.T) {
@@ -756,3 +930,27 @@ func (m *metadataSandboxer) AllowReadWithMetadata(path string, metadata map[stri
 
 	return true
 }
+
+type registrationBus struct {
+	handlers map[string][]sdk.Handler
+}
+
+func newRegistrationBus() *registrationBus {
+	return &registrationBus{handlers: make(map[string][]sdk.Handler)}
+}
+
+func (r *registrationBus) Publish(ev sdk.Event) {
+	for _, h := range r.handlers[ev.Topic] {
+		_ = h(ev)
+	}
+}
+
+func (r *registrationBus) On(topic string, h sdk.Handler) {
+	r.handlers[topic] = append(r.handlers[topic], h)
+}
+
+func (r *registrationBus) OnAll(sdk.Handler) {}
+
+func (r *registrationBus) Off(sdk.Handler) {}
+
+func (r *registrationBus) Close() error { return nil }
