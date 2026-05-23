@@ -1017,6 +1017,64 @@ func TestExecuteRecordsTrackerSynchronously(t *testing.T) {
 	assert.True(t, tracker.WasRead(resolvedTestPath(t, path)), "expected tracker to record read synchronously")
 }
 
+func TestExecuteRecordsTrackerInputAndResolvedPaths(t *testing.T) {
+	tool := &tool{}
+	tmpDir := t.TempDir()
+	targetPath := filepath.Join(tmpDir, "target.txt")
+	linkPath := filepath.Join(tmpDir, "link.txt")
+
+	require.NoError(t, os.WriteFile(targetPath, []byte("track through symlink"), 0o644))
+	require.NoError(t, os.Symlink(targetPath, linkPath))
+
+	tracker := newMockFileTracker()
+	sdk.SetFileTracker(tracker)
+	t.Cleanup(func() { sdk.SetFileTracker(nil) })
+
+	result, err := tool.Execute(context.Background(), map[string]any{"path": linkPath})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+
+	assert.True(t, tracker.WasRead(linkPath), "expected tracker to record caller path")
+	assert.True(t, tracker.WasRead(resolvedTestPath(t, targetPath)), "expected tracker to record resolved path")
+}
+
+func TestExecuteRejectsFileChangedAfterAuthorization(t *testing.T) {
+	origGuardian := getGuardian()
+	origSandboxer := getSandboxer()
+
+	setGuardian(nil)
+	setSandboxer(nil)
+
+	t.Cleanup(func() {
+		setGuardian(origGuardian)
+		setSandboxer(origSandboxer)
+	})
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "target.txt")
+	replacementPath := filepath.Join(tmpDir, "replacement.txt")
+
+	require.NoError(t, os.WriteFile(path, []byte("authorized content"), 0o644))
+	require.NoError(t, os.WriteFile(replacementPath, []byte("replacement content"), 0o644))
+
+	setGuardian(&testGuardian{
+		decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+			return sdk.GuardianDecision{RequestID: req.ID, Action: sdk.GuardianDecisionAllow}, nil
+		},
+	})
+	setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
+		require.NoError(t, os.Rename(replacementPath, path))
+
+		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
+	}})
+
+	result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Content, "file changed after authorization")
+	assert.NotContains(t, result.Content, "replacement content")
+}
+
 func resolvedTestPath(t *testing.T, path string) string {
 	t.Helper()
 

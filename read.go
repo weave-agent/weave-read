@@ -292,19 +292,21 @@ func checkSandboxRead(ctx context.Context, s sdk.Sandboxer, path, guardianReques
 	return &sdk.ToolResult{Content: "sandbox: read denied — " + reason, IsError: true}
 }
 
-func effectivePath(path string) (string, error) {
-	selectedPath := path
-
+func normalizedInputPath(path string) string {
 	if _, err := os.Stat(path); err != nil {
 		normalizedPath := normalizeMacOSPath(path)
 		if normalizedPath != path {
 			if _, normalizedErr := os.Stat(normalizedPath); normalizedErr == nil {
-				selectedPath = normalizedPath
+				return normalizedPath
 			}
 		}
 	}
 
-	absPath, err := filepath.Abs(selectedPath)
+	return path
+}
+
+func effectivePath(path string) (string, error) {
+	absPath, err := filepath.Abs(normalizedInputPath(path))
 	if err != nil {
 		return "", fmt.Errorf("resolve effective path: %w", err)
 	}
@@ -325,7 +327,9 @@ func (t *tool) Execute(ctx context.Context, args map[string]any) (sdk.ToolResult
 		return sdk.ToolResult{Content: "error: path is required", IsError: true}, nil
 	}
 
-	path, err := effectivePath(path)
+	trackerPath := normalizedInputPath(path)
+
+	path, err := effectivePath(trackerPath)
 	if err != nil {
 		return sdk.ToolResult{Content: fmt.Sprintf("error: %s", err), IsError: true}, nil
 	}
@@ -354,6 +358,15 @@ func (t *tool) Execute(ctx context.Context, args map[string]any) (sdk.ToolResult
 	}
 	defer f.Close()
 
+	openedInfo, err := f.Stat()
+	if err != nil {
+		return sdk.ToolResult{Content: fmt.Sprintf("error: %s", err), IsError: true}, nil
+	}
+
+	if !os.SameFile(info, openedInfo) {
+		return sdk.ToolResult{Content: "error: file changed after authorization, please retry", IsError: true}, nil
+	}
+
 	offset, limit := parsePagination(args)
 
 	reader := bufio.NewReader(f)
@@ -376,6 +389,7 @@ func (t *tool) Execute(ctx context.Context, args map[string]any) (sdk.ToolResult
 	// Record read synchronously to avoid a race where a back-to-back edit
 	// checks the tracker before the async bus handler has processed the event.
 	if tracker := sdk.GetFileTracker(); tracker != nil {
+		tracker.RecordRead(trackerPath, info.ModTime())
 		tracker.RecordRead(path, info.ModTime())
 	}
 
