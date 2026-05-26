@@ -30,28 +30,10 @@ const ParamPath = "path"
 type tool struct{}
 
 var (
-	sandboxerMu sync.RWMutex
-	sandboxer   sdk.Sandboxer
-	guardianMu  sync.RWMutex
-	guardian    sdk.Guardian
-	requestSeq  atomic.Uint64
+	guardianMu sync.RWMutex
+	guardian   sdk.Guardian
+	requestSeq atomic.Uint64
 )
-
-func setSandboxer(s sdk.Sandboxer) {
-	sandboxerMu.Lock()
-	sandboxer = s
-	sandboxerMu.Unlock()
-}
-
-func getSandboxer() sdk.Sandboxer {
-	sandboxerMu.RLock()
-
-	s := sandboxer
-
-	sandboxerMu.RUnlock()
-
-	return s
-}
 
 func setGuardian(g sdk.Guardian) {
 	guardianMu.Lock()
@@ -74,14 +56,6 @@ func init() { //nolint:gochecknoinits // extensions register tools and bus liste
 		bus.On(sdk.GuardianRegisteredTopic, func(ev sdk.Event) error {
 			if g, ok := ev.Payload.(sdk.Guardian); ok {
 				setGuardian(g)
-			}
-
-			return nil
-		})
-
-		bus.On(sdk.SandboxRegisteredTopic, func(ev sdk.Event) error {
-			if s, ok := ev.Payload.(sdk.Sandboxer); ok {
-				setSandboxer(s)
 			}
 
 			return nil
@@ -251,47 +225,6 @@ func formatGuardianBlock(req sdk.GuardianRequest, decision sdk.GuardianDecision)
 	return b.String()
 }
 
-func checkSandboxRead(ctx context.Context, s sdk.Sandboxer, path, guardianRequestID string) *sdk.ToolResult {
-	if s == nil {
-		return nil
-	}
-
-	expansion, err := s.RequestExpansion(ctx, sdk.SandboxExpansionRequest{
-		ID:      newRequestID("read-sandbox"),
-		Command: "read",
-		Reason:  "Read file content",
-		Filesystem: []sdk.SandboxFilesystemExpansion{
-			{Path: path, Access: sdk.SandboxFilesystemRead},
-		},
-		Metadata: map[string]any{
-			"operation":           "read",
-			"guardian_request_id": guardianRequestID,
-		},
-	})
-	if err != nil {
-		return &sdk.ToolResult{Content: "sandbox expansion: " + err.Error(), IsError: true}
-	}
-
-	if expansion.State == sdk.SandboxExpansionAllowed {
-		return nil
-	}
-
-	reason := expansion.Reason
-	if reason == "" && expansion.Resolution != nil {
-		reason = expansion.Resolution.Reason
-	}
-
-	if reason == "" && expansion.State != "" {
-		reason = "sandbox expansion " + string(expansion.State)
-	}
-
-	if reason == "" {
-		reason = "path is protected"
-	}
-
-	return &sdk.ToolResult{Content: "sandbox: read denied — " + reason, IsError: true}
-}
-
 func normalizedInputPath(path string) string {
 	if _, err := os.Stat(path); err != nil {
 		normalizedPath := normalizeMacOSPath(path)
@@ -334,7 +267,7 @@ func (t *tool) Execute(ctx context.Context, args map[string]any) (sdk.ToolResult
 		return sdk.ToolResult{Content: fmt.Sprintf("error: %s", err), IsError: true}, nil
 	}
 
-	guardianReq, guardianErr := checkGuardian(ctx, path)
+	_, guardianErr := checkGuardian(ctx, path)
 	if guardianErr != nil {
 		return *guardianErr, nil
 	}
@@ -342,10 +275,6 @@ func (t *tool) Execute(ctx context.Context, args map[string]any) (sdk.ToolResult
 	info, err := os.Stat(path)
 	if err != nil {
 		return sdk.ToolResult{Content: fmt.Sprintf("error: %s", err), IsError: true}, nil
-	}
-
-	if sandboxErr := checkSandboxRead(ctx, getSandboxer(), path, guardianReq.ID); sandboxErr != nil {
-		return *sandboxErr, nil
 	}
 
 	if info.IsDir() {

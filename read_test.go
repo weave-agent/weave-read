@@ -225,58 +225,6 @@ func TestExecute(t *testing.T) {
 	})
 }
 
-func TestExecuteSandboxDenied(t *testing.T) {
-	tool := &tool{}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "secret.txt")
-	require.NoError(t, os.WriteFile(path, []byte("secret data"), 0o644))
-
-	sb := &testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
-		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionDenied, Reason: "path is protected"}, nil
-	}}
-	setSandboxer(sb)
-
-	t.Cleanup(func() { setSandboxer(nil) })
-
-	result, err := tool.Execute(context.Background(), map[string]any{"path": path})
-	require.NoError(t, err)
-	assert.True(t, result.IsError)
-	assert.Contains(t, result.Content, "sandbox: read denied")
-}
-
-func TestExecuteSandboxAllowed(t *testing.T) {
-	tool := &tool{}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "readable.txt")
-	require.NoError(t, os.WriteFile(path, []byte("hello"), 0o644))
-
-	sb := &testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
-		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
-	}}
-	setSandboxer(sb)
-
-	t.Cleanup(func() { setSandboxer(nil) })
-
-	result, err := tool.Execute(context.Background(), map[string]any{"path": path})
-	require.NoError(t, err)
-	assert.False(t, result.IsError)
-	assert.Contains(t, result.Content, "hello")
-}
-
-func TestExecuteSandboxNil(t *testing.T) {
-	tool := &tool{}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "normal.txt")
-	require.NoError(t, os.WriteFile(path, []byte("normal data"), 0o644))
-
-	setSandboxer(nil)
-
-	result, err := tool.Execute(context.Background(), map[string]any{"path": path})
-	require.NoError(t, err)
-	assert.False(t, result.IsError)
-	assert.Contains(t, result.Content, "normal data")
-}
-
 func TestExecuteNormalizedPath(t *testing.T) {
 	tool := &tool{}
 	dir := t.TempDir()
@@ -431,47 +379,13 @@ func TestExecuteNoEventWithoutBus(t *testing.T) {
 	assert.Contains(t, result.Content, "content")
 }
 
-func TestGuardianAndSandboxRegistration(t *testing.T) {
-	origGuardian := getGuardian()
-	origSandboxer := getSandboxer()
-
-	setGuardian(nil)
-	setSandboxer(nil)
-
-	t.Cleanup(func() {
-		setGuardian(origGuardian)
-		setSandboxer(origSandboxer)
-	})
-
-	registrationBus := newRegistrationBus()
-	sdk.InvokeBusSubscribers(registrationBus)
-
-	g := &testGuardian{}
-	s := &testSandboxer{}
-
-	registrationBus.Publish(sdk.NewEvent(sdk.GuardianRegisteredTopic, g))
-	registrationBus.Publish(sdk.NewEvent(sdk.SandboxRegisteredTopic, s))
-
-	assert.Same(t, g, getGuardian())
-	assert.Same(t, s, getSandboxer())
-
-	registrationBus.Publish(sdk.NewEvent(sdk.GuardianRegisteredTopic, "not a guardian"))
-	registrationBus.Publish(sdk.NewEvent(sdk.SandboxRegisteredTopic, "not a sandboxer"))
-
-	assert.Same(t, g, getGuardian())
-	assert.Same(t, s, getSandboxer())
-}
-
 func TestExecuteWithGuardian(t *testing.T) {
 	origGuardian := getGuardian()
-	origSandboxer := getSandboxer()
 
 	setGuardian(nil)
-	setSandboxer(nil)
 
 	t.Cleanup(func() {
 		setGuardian(origGuardian)
-		setSandboxer(origSandboxer)
 	})
 
 	t.Run("allow decision permits read", func(t *testing.T) {
@@ -492,7 +406,6 @@ func TestExecuteWithGuardian(t *testing.T) {
 				}, nil
 			},
 		})
-		setSandboxer(nil)
 
 		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
 		require.NoError(t, err)
@@ -511,8 +424,6 @@ func TestExecuteWithGuardian(t *testing.T) {
 		path := filepath.Join(dir, "block.txt")
 		require.NoError(t, os.WriteFile(path, []byte("should not be read"), 0o644))
 
-		sandboxCalled := false
-
 		setGuardian(&testGuardian{
 			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
 				return sdk.GuardianDecision{
@@ -524,11 +435,6 @@ func TestExecuteWithGuardian(t *testing.T) {
 				}, nil
 			},
 		})
-		setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
-			sandboxCalled = true
-
-			return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
-		}})
 
 		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
 		require.NoError(t, err)
@@ -537,13 +443,10 @@ func TestExecuteWithGuardian(t *testing.T) {
 		assert.Contains(t, result.Content, "action: read")
 		assert.Contains(t, result.Content, "rule: strict")
 		assert.Contains(t, result.Content, "reason: read blocked by policy")
-		assert.False(t, sandboxCalled)
 	})
 
 	t.Run("block decision runs before stat error", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "missing-secret.txt")
-
-		sandboxCalled := false
 
 		setGuardian(&testGuardian{
 			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
@@ -555,11 +458,6 @@ func TestExecuteWithGuardian(t *testing.T) {
 				}, nil
 			},
 		})
-		setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
-			sandboxCalled = true
-
-			return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
-		}})
 
 		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
 		require.NoError(t, err)
@@ -567,7 +465,6 @@ func TestExecuteWithGuardian(t *testing.T) {
 		assert.Contains(t, result.Content, "guardian: blocked")
 		assert.Contains(t, result.Content, "reason: missing path is still protected")
 		assert.NotContains(t, result.Content, "no such file")
-		assert.False(t, sandboxCalled)
 	})
 
 	t.Run("missing guardian permits read", func(t *testing.T) {
@@ -576,7 +473,6 @@ func TestExecuteWithGuardian(t *testing.T) {
 		require.NoError(t, os.WriteFile(path, []byte("no guardian"), 0o644))
 
 		setGuardian(nil)
-		setSandboxer(nil)
 
 		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
 		require.NoError(t, err)
@@ -594,7 +490,6 @@ func TestExecuteWithGuardian(t *testing.T) {
 				return sdk.GuardianDecision{}, errors.New("policy engine unavailable")
 			},
 		})
-		setSandboxer(nil)
 
 		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
 		require.NoError(t, err)
@@ -624,8 +519,6 @@ func TestExecuteWithGuardian(t *testing.T) {
 			require.NoError(t, eventBus.Close())
 		})
 
-		sandboxCalled := false
-
 		setGuardian(&testGuardian{
 			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
 				return sdk.GuardianDecision{
@@ -635,11 +528,6 @@ func TestExecuteWithGuardian(t *testing.T) {
 				}, nil
 			},
 		})
-		setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
-			sandboxCalled = true
-
-			return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
-		}})
 
 		ctx := sdk.WithBus(context.Background(), eventBus)
 		result, err := (&tool{}).Execute(ctx, map[string]any{"path": path})
@@ -647,7 +535,6 @@ func TestExecuteWithGuardian(t *testing.T) {
 		assert.True(t, result.IsError)
 		assert.Contains(t, result.Content, "guardian: blocked")
 		assert.Contains(t, result.Content, "reason: guardian returned unresolved approval decision")
-		assert.False(t, sandboxCalled)
 		assert.False(t, tracker.WasRead(path))
 		assert.False(t, eventSeen)
 	})
@@ -674,8 +561,6 @@ func TestExecuteWithGuardian(t *testing.T) {
 			require.NoError(t, eventBus.Close())
 		})
 
-		sandboxCalled := false
-
 		setGuardian(&testGuardian{
 			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
 				return sdk.GuardianDecision{
@@ -684,11 +569,6 @@ func TestExecuteWithGuardian(t *testing.T) {
 				}, nil
 			},
 		})
-		setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
-			sandboxCalled = true
-
-			return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
-		}})
 
 		ctx := sdk.WithBus(context.Background(), eventBus)
 		result, err := (&tool{}).Execute(ctx, map[string]any{"path": path})
@@ -696,7 +576,6 @@ func TestExecuteWithGuardian(t *testing.T) {
 		assert.True(t, result.IsError)
 		assert.Contains(t, result.Content, "guardian: blocked")
 		assert.Contains(t, result.Content, "reason: guardian returned unresolved approval decision")
-		assert.False(t, sandboxCalled)
 		assert.False(t, tracker.WasRead(path))
 		assert.False(t, eventSeen)
 	})
@@ -704,14 +583,11 @@ func TestExecuteWithGuardian(t *testing.T) {
 
 func TestExecuteNormalizedPathWithGuardian(t *testing.T) {
 	origGuardian := getGuardian()
-	origSandboxer := getSandboxer()
 
 	setGuardian(nil)
-	setSandboxer(nil)
 
 	t.Cleanup(func() {
 		setGuardian(origGuardian)
-		setSandboxer(origSandboxer)
 	})
 
 	dir := t.TempDir()
@@ -720,10 +596,7 @@ func TestExecuteNormalizedPathWithGuardian(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(actualPath, []byte("quoted content"), 0o644))
 
-	var (
-		guardianPath string
-		sandboxPath  string
-	)
+	var guardianPath string
 
 	setGuardian(&testGuardian{
 		decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
@@ -732,13 +605,6 @@ func TestExecuteNormalizedPathWithGuardian(t *testing.T) {
 			return sdk.GuardianDecision{RequestID: req.ID, Action: sdk.GuardianDecisionAllow}, nil
 		},
 	})
-	setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
-		require.Len(t, req.Filesystem, 1)
-		path := req.Filesystem[0].Path
-		sandboxPath = path
-
-		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
-	}})
 
 	result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": inputPath})
 	require.NoError(t, err)
@@ -746,19 +612,15 @@ func TestExecuteNormalizedPathWithGuardian(t *testing.T) {
 	assert.Contains(t, result.Content, "quoted content")
 	expectedPath := resolvedTestPath(t, actualPath)
 	assert.Equal(t, expectedPath, guardianPath)
-	assert.Equal(t, expectedPath, sandboxPath)
 }
 
 func TestExecutePrefersExistingLiteralPathOverNormalizedPath(t *testing.T) {
 	origGuardian := getGuardian()
-	origSandboxer := getSandboxer()
 
 	setGuardian(nil)
-	setSandboxer(nil)
 
 	t.Cleanup(func() {
 		setGuardian(origGuardian)
-		setSandboxer(origSandboxer)
 	})
 
 	dir := t.TempDir()
@@ -768,10 +630,7 @@ func TestExecutePrefersExistingLiteralPathOverNormalizedPath(t *testing.T) {
 	require.NoError(t, os.WriteFile(literalPath, []byte("literal content"), 0o644))
 	require.NoError(t, os.WriteFile(normalizedPath, []byte("normalized content"), 0o644))
 
-	var (
-		guardianPath string
-		sandboxPath  string
-	)
+	var guardianPath string
 
 	setGuardian(&testGuardian{
 		decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
@@ -780,12 +639,6 @@ func TestExecutePrefersExistingLiteralPathOverNormalizedPath(t *testing.T) {
 			return sdk.GuardianDecision{RequestID: req.ID, Action: sdk.GuardianDecisionAllow}, nil
 		},
 	})
-	setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
-		require.Len(t, req.Filesystem, 1)
-		sandboxPath = req.Filesystem[0].Path
-
-		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
-	}})
 
 	result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": literalPath})
 	require.NoError(t, err)
@@ -794,19 +647,15 @@ func TestExecutePrefersExistingLiteralPathOverNormalizedPath(t *testing.T) {
 	assert.NotContains(t, result.Content, "normalized content")
 	expectedPath := resolvedTestPath(t, literalPath)
 	assert.Equal(t, expectedPath, guardianPath)
-	assert.Equal(t, expectedPath, sandboxPath)
 }
 
-func TestExecuteResolvesSymlinkBeforeGuardianAndSandbox(t *testing.T) {
+func TestExecuteResolvesSymlinkBeforeGuardian(t *testing.T) {
 	origGuardian := getGuardian()
-	origSandboxer := getSandboxer()
 
 	setGuardian(nil)
-	setSandboxer(nil)
 
 	t.Cleanup(func() {
 		setGuardian(origGuardian)
-		setSandboxer(origSandboxer)
 	})
 
 	dir := t.TempDir()
@@ -816,10 +665,7 @@ func TestExecuteResolvesSymlinkBeforeGuardianAndSandbox(t *testing.T) {
 	require.NoError(t, os.WriteFile(targetPath, []byte("target content"), 0o644))
 	require.NoError(t, os.Symlink(targetPath, linkPath))
 
-	var (
-		guardianPath string
-		sandboxPath  string
-	)
+	var guardianPath string
 
 	setGuardian(&testGuardian{
 		decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
@@ -828,12 +674,6 @@ func TestExecuteResolvesSymlinkBeforeGuardianAndSandbox(t *testing.T) {
 			return sdk.GuardianDecision{RequestID: req.ID, Action: sdk.GuardianDecisionAllow}, nil
 		},
 	})
-	setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
-		require.Len(t, req.Filesystem, 1)
-		sandboxPath = req.Filesystem[0].Path
-
-		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
-	}})
 
 	result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": linkPath})
 	require.NoError(t, err)
@@ -841,19 +681,15 @@ func TestExecuteResolvesSymlinkBeforeGuardianAndSandbox(t *testing.T) {
 	assert.Contains(t, result.Content, "target content")
 	expectedPath := resolvedTestPath(t, targetPath)
 	assert.Equal(t, expectedPath, guardianPath)
-	assert.Equal(t, expectedPath, sandboxPath)
 }
 
 func TestExecuteRelativePathWithGuardian(t *testing.T) {
 	origGuardian := getGuardian()
-	origSandboxer := getSandboxer()
 
 	setGuardian(nil)
-	setSandboxer(nil)
 
 	t.Cleanup(func() {
 		setGuardian(origGuardian)
-		setSandboxer(origSandboxer)
 	})
 
 	dir := t.TempDir()
@@ -862,10 +698,7 @@ func TestExecuteRelativePathWithGuardian(t *testing.T) {
 
 	t.Chdir(dir)
 
-	var (
-		guardianPath string
-		sandboxPath  string
-	)
+	var guardianPath string
 
 	setGuardian(&testGuardian{
 		decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
@@ -874,12 +707,6 @@ func TestExecuteRelativePathWithGuardian(t *testing.T) {
 			return sdk.GuardianDecision{RequestID: req.ID, Action: sdk.GuardianDecisionAllow}, nil
 		},
 	})
-	setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
-		require.Len(t, req.Filesystem, 1)
-		sandboxPath = req.Filesystem[0].Path
-
-		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
-	}})
 
 	result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": "relative.txt"})
 	require.NoError(t, err)
@@ -887,78 +714,6 @@ func TestExecuteRelativePathWithGuardian(t *testing.T) {
 	assert.Contains(t, result.Content, "relative content")
 	expectedPath := resolvedTestPath(t, path)
 	assert.Equal(t, expectedPath, guardianPath)
-	assert.Equal(t, expectedPath, sandboxPath)
-}
-
-func TestExecuteGuardianSandboxOrdering(t *testing.T) {
-	origGuardian := getGuardian()
-	origSandboxer := getSandboxer()
-
-	setGuardian(nil)
-	setSandboxer(nil)
-
-	t.Cleanup(func() {
-		setGuardian(origGuardian)
-		setSandboxer(origSandboxer)
-	})
-
-	t.Run("guardian allow runs before sandbox", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "order.txt")
-		require.NoError(t, os.WriteFile(path, []byte("order ok"), 0o644))
-
-		var order []string
-
-		setGuardian(&testGuardian{
-			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
-				order = append(order, "guardian")
-
-				return sdk.GuardianDecision{RequestID: req.ID, Action: sdk.GuardianDecisionAllow}, nil
-			},
-		})
-		setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
-			order = append(order, "sandbox")
-
-			return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
-		}})
-
-		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
-		require.NoError(t, err)
-		assert.False(t, result.IsError)
-		assert.Contains(t, result.Content, "order ok")
-		assert.Equal(t, []string{"guardian", "sandbox"}, order)
-	})
-
-	t.Run("guardian block skips sandbox", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "blocked.txt")
-		require.NoError(t, os.WriteFile(path, []byte("blocked"), 0o644))
-
-		var order []string
-
-		setGuardian(&testGuardian{
-			decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
-				order = append(order, "guardian")
-
-				return sdk.GuardianDecision{
-					RequestID: req.ID,
-					Action:    sdk.GuardianDecisionBlock,
-					Reason:    "blocked before sandbox",
-				}, nil
-			},
-		})
-		setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
-			order = append(order, "sandbox")
-
-			return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
-		}})
-
-		result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
-		require.NoError(t, err)
-		assert.True(t, result.IsError)
-		assert.Contains(t, result.Content, "reason: blocked before sandbox")
-		assert.Equal(t, []string{"guardian"}, order)
-	})
 }
 
 // mockFileTracker is a test-double for sdk.FileTracker.
@@ -1038,43 +793,6 @@ func TestExecuteRecordsTrackerInputAndResolvedPaths(t *testing.T) {
 	assert.True(t, tracker.WasRead(resolvedTestPath(t, targetPath)), "expected tracker to record resolved path")
 }
 
-func TestExecuteRejectsFileChangedAfterAuthorization(t *testing.T) {
-	origGuardian := getGuardian()
-	origSandboxer := getSandboxer()
-
-	setGuardian(nil)
-	setSandboxer(nil)
-
-	t.Cleanup(func() {
-		setGuardian(origGuardian)
-		setSandboxer(origSandboxer)
-	})
-
-	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "target.txt")
-	replacementPath := filepath.Join(tmpDir, "replacement.txt")
-
-	require.NoError(t, os.WriteFile(path, []byte("authorized content"), 0o644))
-	require.NoError(t, os.WriteFile(replacementPath, []byte("replacement content"), 0o644))
-
-	setGuardian(&testGuardian{
-		decideFn: func(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
-			return sdk.GuardianDecision{RequestID: req.ID, Action: sdk.GuardianDecisionAllow}, nil
-		},
-	})
-	setSandboxer(&testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
-		require.NoError(t, os.Rename(replacementPath, path))
-
-		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
-	}})
-
-	result, err := (&tool{}).Execute(context.Background(), map[string]any{"path": path})
-	require.NoError(t, err)
-	assert.True(t, result.IsError)
-	assert.Contains(t, result.Content, "file changed after authorization")
-	assert.NotContains(t, result.Content, "replacement content")
-}
-
 func resolvedTestPath(t *testing.T, path string) string {
 	t.Helper()
 
@@ -1094,47 +812,6 @@ func TestGuardianRequest(t *testing.T) {
 	assert.Equal(t, "/tmp/readme.txt", req.Path)
 	assert.Equal(t, "Read file content", req.Description)
 	assert.Equal(t, "read", req.Metadata["operation"])
-}
-
-func TestCheckSandboxReadPassesGuardianMetadata(t *testing.T) {
-	var gotReq sdk.SandboxExpansionRequest
-
-	sb := &testSandboxer{requestExpansionFn: func(_ context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
-		gotReq = req
-
-		return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
-	}}
-
-	assert.Nil(t, checkSandboxRead(context.Background(), sb, "/tmp/file.txt", "guardian-1"))
-	require.Len(t, gotReq.Filesystem, 1)
-	assert.Equal(t, "/tmp/file.txt", gotReq.Filesystem[0].Path)
-	assert.Equal(t, sdk.SandboxFilesystemRead, gotReq.Filesystem[0].Access)
-	assert.Equal(t, "read", gotReq.Metadata["operation"])
-	assert.Equal(t, "guardian-1", gotReq.Metadata["guardian_request_id"])
-}
-
-type testSandboxer struct {
-	requestExpansionFn func(context.Context, sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error)
-}
-
-func (ts *testSandboxer) WrapCommand(context.Context, sdk.SandboxCommandRequest) (sdk.SandboxCommand, error) {
-	return sdk.SandboxCommand{}, nil
-}
-
-func (ts *testSandboxer) Status(context.Context) (sdk.SandboxStatus, error) {
-	return sdk.SandboxStatus{}, nil
-}
-
-func (ts *testSandboxer) RequestExpansion(ctx context.Context, req sdk.SandboxExpansionRequest) (sdk.SandboxExpansion, error) {
-	if ts.requestExpansionFn != nil {
-		return ts.requestExpansionFn(ctx, req)
-	}
-
-	return sdk.SandboxExpansion{RequestID: req.ID, State: sdk.SandboxExpansionAllowed}, nil
-}
-
-func (ts *testSandboxer) ResolveExpansion(context.Context, string, sdk.SandboxExpansionResolution) error {
-	return nil
 }
 
 type testGuardian struct {
@@ -1157,26 +834,3 @@ func (tg *testGuardian) Snapshot(context.Context) (sdk.GuardianSnapshot, error) 
 	return sdk.GuardianSnapshot{}, nil
 }
 
-type registrationBus struct {
-	handlers map[string][]sdk.Handler
-}
-
-func newRegistrationBus() *registrationBus {
-	return &registrationBus{handlers: make(map[string][]sdk.Handler)}
-}
-
-func (r *registrationBus) Publish(ev sdk.Event) {
-	for _, h := range r.handlers[ev.Topic] {
-		_ = h(ev)
-	}
-}
-
-func (r *registrationBus) On(topic string, h sdk.Handler) {
-	r.handlers[topic] = append(r.handlers[topic], h)
-}
-
-func (r *registrationBus) OnAll(sdk.Handler) {}
-
-func (r *registrationBus) Off(sdk.Handler) {}
-
-func (r *registrationBus) Close() error { return nil }
